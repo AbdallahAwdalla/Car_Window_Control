@@ -9,17 +9,23 @@
 /********************************************************************************
  * INCLUDES
  ********************************************************************************/
+#define PART_TM4C123GH6PM
 #include <stdint.h>
 #include <stdbool.h>
-#include <FreeRTOS.h>
-#include <task.h>
-#include <semphr.h>
-#include <timers.h>
+#include "FreeRTOS.h"
+#include "task.h"
+#include "semphr.h"
+#include "inc/hw_ints.h"
 #include "inc/hw_memmap.h"
-#include "driverlib/debug.h"
-#include "driverlib/gpio.h"
+#include "inc/hw_types.h"
+#include "inc/hw_types.h"
+#include "driverlib/interrupt.h"
 #include "driverlib/sysctl.h"
+#include "driverlib/gpio.h"
+#include "driverlib/timer.h"
 
+#include "queue.h"
+#include "timers.h"
 
 /********************************************************************************
  * PRIVATE MACROS AND DEFINES
@@ -35,20 +41,38 @@
 /********************************************************************************
  * STATIC VARIABLES
  ********************************************************************************/
-static uint8_t myFlag;
+static uint8_t LowerlimitReached = false;
+static uint8_t UpperlimitReached = false;
+static uint32_t portAReq = 0u;
+static uint32_t portAReq2 = 0u;
+volatile TickType_t minTicksReq = 500u;
 /********************************************************************************
  * GLOBAL VARIABLES
  ********************************************************************************/
 
 
+// Declare semaphore handles for each task
+SemaphoreHandle_t xSemaphorePassengerUp, 
+                  xSemaphorePassengerDown, 
+                  xSemaphoreDriverUp, 
+                  xSemaphoreDriverDown, 
+                  xSemaphoreLock, 
+                  xSemaphoreUpperLimit, 
+                  xSemaphoreLowerLimit;
 
 
 /********************************************************************************
  * STATIC FUNCTION PROTOTYPES
  ********************************************************************************/
 
-static void Task01( void *pvParameters );
-static void MyBlinkyLED_Init( void );
+void GPIOPortA_Handler(void);
+void GPIOPortF_Handler(void);
+void vTaskFunctionPassengerUp(void *pvParameters);
+void vTaskFunctionPassengerDown(void *pvParameters);
+void vTaskFunctionDriverUp(void *pvParameters);
+void vTaskFunctionDriverDown(void *pvParameters);
+void vTaskFunctionLowerLimit(void *pvParameters);
+void vTaskFunctionUpperLimit(void *pvParameters);
 
 /********************************************************************************
  * FUNCTION NAME:       main
@@ -57,82 +81,421 @@ static void MyBlinkyLED_Init( void );
  * 
  * 
 ********************************************************************************/
-int main( void )
-{
-    MyBlinkyLED_Init();
+int main(void) {
+    // Set the system clock to 40MHz
+    SysCtlClockSet(SYSCTL_SYSDIV_5 | SYSCTL_USE_PLL | SYSCTL_XTAL_16MHZ | SYSCTL_OSC_MAIN);
 
-    /* Start the two tasks as described in the comments at the top of this file. */
-    xTaskCreate( Task01,			        /* The function that implements the task. */
-                 "Task01", 					/* The text name assigned to the task - for debug only as it is not used by the kernel. */
-                 configMINIMAL_STACK_SIZE, 	/* The size of the stack to allocate to the task. */
-                 NULL, 						/* The parameter passed to the task - not used in this simple case. */
-                 TASK_01_PRIORITY,          /* The priority assigned to the task. */
-                 NULL );					/* The task handle is not required, so NULL is passed. */
+    // Enable the GPIO port that is used for the driver and passenger
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOA);
+
+    // Configure the control switch pins as inputs
+    GPIOPinTypeGPIOInput(GPIO_PORTA_BASE, GPIO_PIN_2 | GPIO_PIN_3 | GPIO_PIN_4 | GPIO_PIN_5 | GPIO_PIN_6);
+    GPIOPadConfigSet(GPIO_PORTA_BASE, GPIO_PIN_2 | GPIO_PIN_3 | GPIO_PIN_4 | GPIO_PIN_5 | GPIO_PIN_6, GPIO_STRENGTH_2MA, GPIO_PIN_TYPE_STD_WPU);
 
 
+    // Enable the GPIO port that is used for the motor
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOF);
+
+    // Configure the motor pins as outputs
+    GPIOPinTypeGPIOOutput(GPIO_PORTF_BASE, GPIO_PIN_2 | GPIO_PIN_3);
+
+    // Configure the limit switch pins as inputs
+    GPIOPinTypeGPIOInput(GPIO_PORTF_BASE, GPIO_PIN_0 | GPIO_PIN_1 | GPIO_PIN_4);
+    GPIOPadConfigSet(GPIO_PORTF_BASE, GPIO_PIN_0 | GPIO_PIN_1 | GPIO_PIN_4, GPIO_STRENGTH_12MA, GPIO_PIN_TYPE_STD_WPU);
+
+    // Create the semaphores
+    xSemaphorePassengerUp = xSemaphoreCreateBinary();
+    xSemaphorePassengerDown = xSemaphoreCreateBinary();
+    xSemaphoreDriverUp = xSemaphoreCreateBinary();
+    xSemaphoreDriverDown = xSemaphoreCreateBinary();
+    xSemaphoreLock = xSemaphoreCreateBinary();
+    xSemaphoreLowerLimit = xSemaphoreCreateBinary();
+    xSemaphoreUpperLimit = xSemaphoreCreateBinary();
+
+    // Create the tasks
+    xTaskCreate(vTaskFunctionPassengerUp, "Task Passenger Up", configMINIMAL_STACK_SIZE, NULL, tskIDLE_PRIORITY + 1U, NULL);
+    xTaskCreate(vTaskFunctionPassengerDown, "Task Passenger Down", configMINIMAL_STACK_SIZE, NULL, tskIDLE_PRIORITY + 1U, NULL);
+    xTaskCreate(vTaskFunctionDriverUp, "Task Driver Up", configMINIMAL_STACK_SIZE, NULL, tskIDLE_PRIORITY + 1U, NULL);
+    xTaskCreate(vTaskFunctionDriverDown, "Task Driver Down", configMINIMAL_STACK_SIZE, NULL, tskIDLE_PRIORITY + 1U, NULL);
+    xTaskCreate(vTaskFunctionLowerLimit, "Task Lower Limit", configMINIMAL_STACK_SIZE, NULL, tskIDLE_PRIORITY + 1U, NULL);
+    xTaskCreate(vTaskFunctionUpperLimit, "Task Upper Limit", configMINIMAL_STACK_SIZE, NULL, tskIDLE_PRIORITY + 1U, NULL);
+
+
+    // Configure the interrupts for the switch pins of Port A
+    IntEnable(INT_GPIOA);
+    GPIOIntTypeSet(GPIO_PORTA_BASE, GPIO_PIN_2 | GPIO_PIN_3 | GPIO_PIN_4 | GPIO_PIN_5, GPIO_FALLING_EDGE);
+    GPIOIntRegister(GPIO_PORTA_BASE, GPIOPortA_Handler);
+    GPIOIntClear(GPIO_PORTA_BASE, GPIO_PIN_2 | GPIO_PIN_3 | GPIO_PIN_4 | GPIO_PIN_5);
+    GPIOIntEnable(GPIO_PORTA_BASE, GPIO_PIN_2 | GPIO_PIN_3 | GPIO_PIN_4 | GPIO_PIN_5);
+    IntPrioritySet(INT_GPIOA,configMAX_SYSCALL_INTERRUPT_PRIORITY + 1U);
+    // Configure the interrupts for the switch pins of Port F
+    IntEnable(INT_GPIOF);
+    GPIOIntTypeSet(GPIO_PORTF_BASE, GPIO_PIN_0 | GPIO_PIN_1 | GPIO_PIN_4, GPIO_BOTH_EDGES);
+    GPIOIntRegister(GPIO_PORTF_BASE, GPIOPortF_Handler);
+    GPIOIntClear(GPIO_PORTF_BASE, GPIO_PIN_0 | GPIO_PIN_1 | GPIO_PIN_4);
+    GPIOIntEnable(GPIO_PORTF_BASE, GPIO_PIN_0 | GPIO_PIN_1 | GPIO_PIN_4);
+    IntPrioritySet(INT_GPIOF,configMAX_SYSCALL_INTERRUPT_PRIORITY + 1U);
+
+
+    // Start the scheduler
     vTaskStartScheduler();
 
-    /* If all is well, the scheduler will now be running, and the following
-    line will never be reached.  If the following line does execute, then
-    there was insufficient FreeRTOS heap memory available for the idle and/or
-    timer tasks	to be created.  See the memory management section on the
-    FreeRTOS web site for more details. */
-    for( ;; );
+    // Should never reach here
+    return 0;
 }
-
 /********************************************************************************
- * FUNCTION NAME:       Task01
- * \param  [in]         void *pvParameters
+ * FUNCTION NAME:       vISRFunctionPassengerUp
+ * \param  [in]         void 
  * \param  [out]        void 
  * 
  * 
 ********************************************************************************/
-static void Task01( void *pvParameters )
-{
-	uint32_t ulReceivedValue;
+void vISRFunctionPassengerUp(void) {
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    xSemaphoreGiveFromISR(xSemaphorePassengerUp, &xHigherPriorityTaskWoken);
+    /* Giving the semaphore may have unblocked a task - if it did and the
+    unblocked task has a priority equal to or above the currently executing
+    task then xHigherPriorityTaskWoken will have been set to pdTRUE and
+    portEND_SWITCHING_ISR() will force a context switch to the newly unblocked
+    higher priority task.
 
-	/* Prevent the compiler warning about the unused parameter. */
-	( void ) pvParameters;
+    NOTE: The syntax for forcing a context switch within an ISR varies between
+    FreeRTOS ports.  The portEND_SWITCHING_ISR() macro is provided as part of
+    the Cortex M3 port layer for this purpose.  taskYIELD() must never be called
+    from an ISR! */
+    portEND_SWITCHING_ISR( xHigherPriorityTaskWoken );
+    //portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+}
+/********************************************************************************
+ * FUNCTION NAME:       vISRFunctionPassengerDown
+ * \param  [in]         void 
+ * \param  [out]        void 
+ * 
+ * 
+********************************************************************************/
+void vISRFunctionPassengerDown(void) {
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    xSemaphoreGiveFromISR(xSemaphorePassengerDown, &xHigherPriorityTaskWoken);
+    /* Giving the semaphore may have unblocked a task - if it did and the
+    unblocked task has a priority equal to or above the currently executing
+    task then xHigherPriorityTaskWoken will have been set to pdTRUE and
+    portEND_SWITCHING_ISR() will force a context switch to the newly unblocked
+    higher priority task.
 
-	for( ;; )
-	{
-        if (0U ==  myFlag)
+    NOTE: The syntax for forcing a context switch within an ISR varies between
+    FreeRTOS ports.  The portEND_SWITCHING_ISR() macro is provided as part of
+    the Cortex M3 port layer for this purpose.  taskYIELD() must never be called
+    from an ISR! */
+    portEND_SWITCHING_ISR( xHigherPriorityTaskWoken );
+    //portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+}
+
+
+void vISRFunctionDriverUp(void) {
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    xSemaphoreGiveFromISR(xSemaphoreDriverUp, &xHigherPriorityTaskWoken);
+    /* Giving the semaphore may have unblocked a task - if it did and the
+    unblocked task has a priority equal to or above the currently executing
+    task then xHigherPriorityTaskWoken will have been set to pdTRUE and
+    portEND_SWITCHING_ISR() will force a context switch to the newly unblocked
+    higher priority task.
+
+    NOTE: The syntax for forcing a context switch within an ISR varies between
+    FreeRTOS ports.  The portEND_SWITCHING_ISR() macro is provided as part of
+    the Cortex M3 port layer for this purpose.  taskYIELD() must never be called
+    from an ISR! */
+    portEND_SWITCHING_ISR( xHigherPriorityTaskWoken );
+    //portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+}
+
+void vISRFunctionDriverDown(void) {
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    xSemaphoreGiveFromISR(xSemaphoreDriverDown, &xHigherPriorityTaskWoken);
+    /* Giving the semaphore may have unblocked a task - if it did and the
+    unblocked task has a priority equal to or above the currently executing
+    task then xHigherPriorityTaskWoken will have been set to pdTRUE and
+    portEND_SWITCHING_ISR() will force a context switch to the newly unblocked
+    higher priority task.
+
+    NOTE: The syntax for forcing a context switch within an ISR varies between
+    FreeRTOS ports.  The portEND_SWITCHING_ISR() macro is provided as part of
+    the Cortex M3 port layer for this purpose.  taskYIELD() must never be called
+    from an ISR! */
+    portEND_SWITCHING_ISR( xHigherPriorityTaskWoken );
+    //portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+}
+
+void vISRFunctionLowerLimit(void) {
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    xSemaphoreGiveFromISR(xSemaphoreLowerLimit, &xHigherPriorityTaskWoken);
+    /* Giving the semaphore may have unblocked a task - if it did and the
+    unblocked task has a priority equal to or above the currently executing
+    task then xHigherPriorityTaskWoken will have been set to pdTRUE and
+    portEND_SWITCHING_ISR() will force a context switch to the newly unblocked
+    higher priority task.
+
+    NOTE: The syntax for forcing a context switch within an ISR varies between
+    FreeRTOS ports.  The portEND_SWITCHING_ISR() macro is provided as part of
+    the Cortex M3 port layer for this purpose.  taskYIELD() must never be called
+    from an ISR! */
+    portEND_SWITCHING_ISR( xHigherPriorityTaskWoken );
+    //portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+}
+
+void vISRFunctionUpperLimit(void) {
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    xSemaphoreGiveFromISR(xSemaphoreUpperLimit, &xHigherPriorityTaskWoken);
+    /* Giving the semaphore may have unblocked a task - if it did and the
+    unblocked task has a priority equal to or above the currently executing
+    task then xHigherPriorityTaskWoken will have been set to pdTRUE and
+    portEND_SWITCHING_ISR() will force a context switch to the newly unblocked
+    higher priority task.
+
+    NOTE: The syntax for forcing a context switch within an ISR varies between
+    FreeRTOS ports.  The portEND_SWITCHING_ISR() macro is provided as part of
+    the Cortex M3 port layer for this purpose.  taskYIELD() must never be called
+    from an ISR! */
+    portEND_SWITCHING_ISR( xHigherPriorityTaskWoken );
+    //portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+}
+
+// Define the task functions
+void vTaskFunctionPassengerUp(void *pvParameters) {
+    while(1) {
+        xSemaphoreTake(xSemaphorePassengerUp, portMAX_DELAY);
+        vTaskDelay( 1000 / portTICK_RATE_MS );
+
+        // Process interrupt for pin 2 port A
+        if(( GPIOPinRead(GPIO_PORTA_BASE, GPIO_PIN_6) & GPIO_PIN_6 )== GPIO_PIN_6)
         {
-            /* Turn on the LED.*/
-            GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_3, GPIO_PIN_3);
+            LowerlimitReached = false;
+            UpperlimitReached = false;
+            vTaskDelay( 1000 / portTICK_RATE_MS );
+            if(( GPIOPinRead(GPIO_PORTA_BASE, GPIO_PIN_2) & GPIO_PIN_2 )!= GPIO_PIN_2)
+            {
+                while(( GPIOPinRead(GPIO_PORTA_BASE, GPIO_PIN_2) & GPIO_PIN_2 )!= GPIO_PIN_2)
+                {
+                    GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_2, GPIO_PIN_2);
+                    GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_3, false);
+                    vTaskDelay( 250 / portTICK_RATE_MS );
+                }
+                GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_2, false);
+                GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_3, false);
+            }
+            else
+            {
+                GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_2, GPIO_PIN_2);
+                GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_3, false);
+                vTaskDelay( 5000 / portTICK_RATE_MS );
+                if(false == UpperlimitReached)
+                {
+                    GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_2, false);
+                    GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_3, GPIO_PIN_3);
+                    vTaskDelay( 2000 / portTICK_RATE_MS );
+                    GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_2, false);
+                    GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_3, false);
+                    GPIOIntClear(GPIO_PORTA_BASE, GPIO_PIN_2);
+                }
+            }
+        }
+        taskYIELD();
+
+    }
+}
+
+// Define the task functions
+void vTaskFunctionPassengerDown(void *pvParameters) {
+    while(1) {
+        xSemaphoreTake(xSemaphorePassengerDown, portMAX_DELAY);
+        vTaskDelay( 1000 / portTICK_RATE_MS );
+        // Process interrupt for pin 3 port A
+        if(( GPIOPinRead(GPIO_PORTA_BASE, GPIO_PIN_6) & GPIO_PIN_6 )== GPIO_PIN_6)
+        {
+            LowerlimitReached = false;
+            UpperlimitReached = false;
+            vTaskDelay( 1000 / portTICK_RATE_MS );
+            if(( GPIOPinRead(GPIO_PORTA_BASE, GPIO_PIN_3) & GPIO_PIN_3 )!= GPIO_PIN_3)
+            {
+                while(( GPIOPinRead(GPIO_PORTA_BASE, GPIO_PIN_3) & GPIO_PIN_3 )!= GPIO_PIN_3)
+                {
+                    GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_2, false);
+                    GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_3, GPIO_PIN_3);
+                    vTaskDelay( 250 / portTICK_RATE_MS );
+                }
+                GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_2, false);
+                GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_3, false);
+                vTaskDelay( 250 / portTICK_RATE_MS );
+            }
+            else
+            {
+                GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_2, false);
+                GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_3, GPIO_PIN_3);
+                vTaskDelay( 5000 / portTICK_RATE_MS );
+                if(false == LowerlimitReached)
+                {
+                    GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_2, GPIO_PIN_2);
+                    GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_3, false);
+                    vTaskDelay( 2000 / portTICK_RATE_MS );
+                    GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_2, false);
+                    GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_3, false);
+                GPIOIntClear(GPIO_PORTA_BASE, GPIO_PIN_3);
+                }
+            }
+        }
+        taskYIELD();
+
+    };
+}
+
+void vTaskFunctionDriverUp(void *pvParameters) {
+    while(1) {
+        xSemaphoreTake(xSemaphoreDriverUp, portMAX_DELAY);
+        // Process interrupt for pin 4 port A
+        vTaskDelay( 1000 / portTICK_RATE_MS );
+        LowerlimitReached = false;
+        UpperlimitReached = false;
+        if(( GPIOPinRead(GPIO_PORTA_BASE, GPIO_PIN_4) & GPIO_PIN_4 )!= GPIO_PIN_4)
+        {
+            while(( GPIOPinRead(GPIO_PORTA_BASE, GPIO_PIN_4) & GPIO_PIN_4 )!= GPIO_PIN_4)
+            {
+                GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_2, GPIO_PIN_2);
+                GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_3, false);
+                vTaskDelay( 250 / portTICK_RATE_MS );
+            }
+            GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_2, false);
+            GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_3, false);
+            vTaskDelay( 250 / portTICK_RATE_MS );
         }
         else
         {
-            /* Turn on the LED.*/
-            GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_3, 0x0u);
+            GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_2, GPIO_PIN_2);
+            GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_3, false);
+            vTaskDelay( 5000 / portTICK_RATE_MS );
+            if(false == UpperlimitReached)
+            {
+                GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_2, false);
+                GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_3, GPIO_PIN_3);
+                vTaskDelay( 2000 / portTICK_RATE_MS );
+                GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_2, false);
+                GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_3, false);
+                GPIOIntClear(GPIO_PORTA_BASE, GPIO_PIN_4);
+
+            }
         }
-        myFlag = (myFlag + 1U) % 2U;
-        
-		vTaskDelay(1000);
-	}
+        taskYIELD();
+    }
 }
 
+void vTaskFunctionDriverDown(void *pvParameters) {
+    while(1) {
+        xSemaphoreTake(xSemaphoreDriverDown, portMAX_DELAY);
+        // Process interrupt for pin 5 port A
+        vTaskDelay( 1000 / portTICK_RATE_MS );
+        LowerlimitReached = false;
+        UpperlimitReached = false;
+        if(( GPIOPinRead(GPIO_PORTA_BASE, GPIO_PIN_5) & GPIO_PIN_5 )!= GPIO_PIN_5)
+        {
+            while(( GPIOPinRead(GPIO_PORTA_BASE, GPIO_PIN_5) & GPIO_PIN_5 )!= GPIO_PIN_5)
+            {
+                GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_2, false);
+                GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_3, GPIO_PIN_3);
+                vTaskDelay( 250 / portTICK_RATE_MS );
+            }
+            GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_2, false);
+            GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_3, false);
+            vTaskDelay( 250 / portTICK_RATE_MS );
+        }
+        else
+        {
+            GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_2, false);
+            GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_3, GPIO_PIN_3);
+            vTaskDelay( 5000 / portTICK_RATE_MS );
+            if(false == LowerlimitReached)
+            {
+                GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_2, GPIO_PIN_2);
+                GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_3, false);
+                vTaskDelay( 2000 / portTICK_RATE_MS );
+                GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_2, false);
+                GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_3, false);
+                GPIOIntClear(GPIO_PORTA_BASE, GPIO_PIN_5);
+            }
+        }
+        taskYIELD();
+    }
+}
 
-/********************************************************************************
- * FUNCTION NAME:       MyBlinkyLED_Init
- * \param  [in]         void *pvParameters
- * \param  [out]        void 
- * 
- * 
-********************************************************************************/
-static void MyBlinkyLED_Init( void )
-{
+void vTaskFunctionLowerLimit(void *pvParameters) {
+    while(1) {
+        xSemaphoreTake(xSemaphoreLowerLimit, portMAX_DELAY);
+        // Process interrupt for pin 6 port F
+        GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_2, false);
+        GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_3, false);
+        LowerlimitReached = true;
+    }
+}
+
+void vTaskFunctionUpperLimit(void *pvParameters) {
+    while(1) {
+        xSemaphoreTake(xSemaphoreUpperLimit, portMAX_DELAY);
+        // Process interrupt for pin 7 port F
+        GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_2, false);
+        GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_3, false);
+        UpperlimitReached = true;
+    }
+}
+
+// Interrupt handlers for GPIO Port A
+void GPIOPortA_Handler(void) {
     
-    /* Enable the GPIO port that is used for the on-board LED. */  
-    SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOF);
-
-    /* Check if the peripheral access is enabled. */ 
-    while(!SysCtlPeripheralReady(SYSCTL_PERIPH_GPIOF))
+    
+    static TickType_t lastTickVal =0U;
+    TickType_t currentTickVal =  xTaskGetTickCountFromISR();
+    uint32_t intStatus = GPIOIntStatus(GPIO_PORTA_BASE, false);
+    /// Get rid of bouncing 
+    GPIOIntClear(GPIO_PORTA_BASE, GPIO_PIN_2 | GPIO_PIN_3 | GPIO_PIN_4 |GPIO_PIN_5);
+    
+    if ((currentTickVal - lastTickVal) > minTicksReq )
     {
+        
+        if(intStatus & GPIO_PIN_2) {
+            GPIOIntClear(GPIO_PORTA_BASE, GPIO_PIN_2);
+            vISRFunctionPassengerUp();
+        }
+        if(intStatus & GPIO_PIN_3) {
+            GPIOIntClear(GPIO_PORTA_BASE, GPIO_PIN_3);
+            vISRFunctionPassengerDown();
+        }
+        if(intStatus & GPIO_PIN_4) {
+            GPIOIntClear(GPIO_PORTA_BASE, GPIO_PIN_4);
+            vISRFunctionDriverUp();
+        }
+        if(intStatus & GPIO_PIN_5) {
+            GPIOIntClear(GPIO_PORTA_BASE, GPIO_PIN_5);
+            vISRFunctionDriverDown();
+        }
+    }
+    lastTickVal = currentTickVal;
+    
+}
+
+// Interrupt handlers for GPIO Port F
+void GPIOPortF_Handler(void) {
+    static TickType_t lastTickValF =0U;
+    TickType_t currentTickVal =  xTaskGetTickCountFromISR();
+    uint32_t intStatus = GPIOIntStatus(GPIO_PORTF_BASE, true);
+
+    GPIOIntClear(GPIO_PORTF_BASE, GPIO_PIN_1 | GPIO_PIN_4);
+
+    /// Get rid of bouncing 
+    if ((currentTickVal - lastTickValF) > minTicksReq )
+    {
+        if(intStatus & GPIO_PIN_1) {
+            vISRFunctionLowerLimit();
+        }
+        if(intStatus & GPIO_PIN_4) {
+            vISRFunctionUpperLimit();
+        }
     }
 
-    /* Enable the GPIO pin for the LED (PF3).  Set the direction as output, and */
-    /* enable the GPIO pin for digital function. */
-    GPIOPinTypeGPIOOutput(GPIO_PORTF_BASE, GPIO_PIN_3);
-
+    lastTickValF = currentTickVal;
 }
