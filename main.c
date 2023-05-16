@@ -189,8 +189,13 @@ void vISRFunctionPassengerDown(void) {
     portEND_SWITCHING_ISR( xHigherPriorityTaskWoken );
     //portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }
-
-
+/********************************************************************************
+ * FUNCTION NAME:       vISRFunctionDriverUp
+ * \param  [in]         void
+ * \param  [out]        void
+ * 
+ * 
+********************************************************************************/
 void vISRFunctionDriverUp(void) {
     BaseType_t xHigherPriorityTaskWoken = pdFALSE;
     xSemaphoreGiveFromISR(xSemaphoreDriverUp, &xHigherPriorityTaskWoken);
@@ -207,7 +212,13 @@ void vISRFunctionDriverUp(void) {
     portEND_SWITCHING_ISR( xHigherPriorityTaskWoken );
     //portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }
-
+/********************************************************************************
+ * FUNCTION NAME:       vISRFunctionDriverDown
+ * \param  [in]         void
+ * \param  [out]        void
+ * 
+ * 
+********************************************************************************/
 void vISRFunctionDriverDown(void) {
     BaseType_t xHigherPriorityTaskWoken = pdFALSE;
     xSemaphoreGiveFromISR(xSemaphoreDriverDown, &xHigherPriorityTaskWoken);
@@ -224,7 +235,13 @@ void vISRFunctionDriverDown(void) {
     portEND_SWITCHING_ISR( xHigherPriorityTaskWoken );
     //portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }
-
+/********************************************************************************
+ * FUNCTION NAME:       vISRFunctionLowerLimit
+ * \param  [in]         void
+ * \param  [out]        void
+ * 
+ * 
+********************************************************************************/
 void vISRFunctionLowerLimit(void) {
     BaseType_t xHigherPriorityTaskWoken = pdFALSE;
     xSemaphoreGiveFromISR(xSemaphoreLowerLimit, &xHigherPriorityTaskWoken);
@@ -241,7 +258,13 @@ void vISRFunctionLowerLimit(void) {
     portEND_SWITCHING_ISR( xHigherPriorityTaskWoken );
     //portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }
-
+/********************************************************************************
+ * FUNCTION NAME:       vISRFunctionUpperLimit
+ * \param  [in]         void
+ * \param  [out]        void
+ * 
+ * 
+********************************************************************************/
 void vISRFunctionUpperLimit(void) {
     BaseType_t xHigherPriorityTaskWoken = pdFALSE;
     xSemaphoreGiveFromISR(xSemaphoreUpperLimit, &xHigherPriorityTaskWoken);
@@ -258,8 +281,13 @@ void vISRFunctionUpperLimit(void) {
     portEND_SWITCHING_ISR( xHigherPriorityTaskWoken );
     //portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }
-
-// Define the task functions
+/********************************************************************************
+ * FUNCTION NAME:       vISRFunctionUpperLimit
+ * \param  [in]         void*
+ * \param  [out]        void
+ * 
+ * 
+********************************************************************************/
 void vTaskFunctionPassengerUp(void *pvParameters) {
     while(1) {
         xSemaphoreTake(xSemaphorePassengerUp, portMAX_DELAY);
@@ -302,8 +330,13 @@ void vTaskFunctionPassengerUp(void *pvParameters) {
 
     }
 }
-
-// Define the task functions
+/********************************************************************************
+ * FUNCTION NAME:       vTaskFunctionPassengerDown
+ * \param  [in]         void*
+ * \param  [out]        void
+ * 
+ * 
+********************************************************************************/
 void vTaskFunctionPassengerDown(void *pvParameters) {
     while(1) {
         xSemaphoreTake(xSemaphorePassengerDown, portMAX_DELAY);
@@ -346,7 +379,13 @@ void vTaskFunctionPassengerDown(void *pvParameters) {
 
     };
 }
-
+/********************************************************************************
+ * FUNCTION NAME:       vTaskFunctionDriverUp
+ * \param  [in]         void*
+ * \param  [out]        void
+ * 
+ * 
+********************************************************************************/
 void vTaskFunctionDriverUp(void *pvParameters) {
     while(1) {
         xSemaphoreTake(xSemaphoreDriverUp, portMAX_DELAY);
@@ -385,7 +424,13 @@ void vTaskFunctionDriverUp(void *pvParameters) {
         taskYIELD();
     }
 }
-
+/********************************************************************************
+ * FUNCTION NAME:       vTaskFunctionDriverDown
+ * \param  [in]         void*
+ * \param  [out]        void
+ * 
+ * 
+********************************************************************************/
 void vTaskFunctionDriverDown(void *pvParameters) {
     while(1) {
         xSemaphoreTake(xSemaphoreDriverDown, portMAX_DELAY);
@@ -423,7 +468,13 @@ void vTaskFunctionDriverDown(void *pvParameters) {
         taskYIELD();
     }
 }
-
+/********************************************************************************
+ * FUNCTION NAME:       vTaskFunctionLowerLimit
+ * \param  [in]         void*
+ * \param  [out]        void
+ * 
+ * 
+********************************************************************************/
 void vTaskFunctionLowerLimit(void *pvParameters) {
     while(1) {
         xSemaphoreTake(xSemaphoreLowerLimit, portMAX_DELAY);
@@ -433,7 +484,13 @@ void vTaskFunctionLowerLimit(void *pvParameters) {
         LowerlimitReached = true;
     }
 }
-
+/********************************************************************************
+ * FUNCTION NAME:       vTaskFunctionUpperLimit
+ * \param  [in]         void*
+ * \param  [out]        void
+ * 
+ * 
+********************************************************************************/
 void vTaskFunctionUpperLimit(void *pvParameters) {
     while(1) {
         xSemaphoreTake(xSemaphoreUpperLimit, portMAX_DELAY);
@@ -443,8 +500,13 @@ void vTaskFunctionUpperLimit(void *pvParameters) {
         UpperlimitReached = true;
     }
 }
-
-// Interrupt handlers for GPIO Port A
+/********************************************************************************
+ * FUNCTION NAME:       GPIOPortA_Handler
+ * \param  [in]         void
+ * \param  [out]        void
+ * 
+ * 
+********************************************************************************/
 void GPIOPortA_Handler(void) {
     
     
@@ -453,7 +515,7 @@ void GPIOPortA_Handler(void) {
     uint32_t intStatus = GPIOIntStatus(GPIO_PORTA_BASE, false);
     /// Get rid of bouncing 
     GPIOIntClear(GPIO_PORTA_BASE, GPIO_PIN_2 | GPIO_PIN_3 | GPIO_PIN_4 |GPIO_PIN_5);
-    
+
     if ((currentTickVal - lastTickVal) > minTicksReq )
     {
         
@@ -477,8 +539,13 @@ void GPIOPortA_Handler(void) {
     lastTickVal = currentTickVal;
     
 }
-
-// Interrupt handlers for GPIO Port F
+/********************************************************************************
+ * FUNCTION NAME:       GPIOPortF_Handler
+ * \param  [in]         void
+ * \param  [out]        void
+ * 
+ * 
+********************************************************************************/
 void GPIOPortF_Handler(void) {
     static TickType_t lastTickValF =0U;
     TickType_t currentTickVal =  xTaskGetTickCountFromISR();
